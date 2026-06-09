@@ -8,10 +8,23 @@
   4. 可视化 + CSV 导出
 
 Usage:
-    cd sequential/rl_git
+    # 命令行
+    cd sequential/rl_state_modeling
     python app.py                                    # 默认参数
     python app.py --n_episodes 200 --lr 1e-4         # 覆盖参数
-    python app.py --help                              # 查看所有参数
+    python app.py --config config.json                # 从 JSON 读取配置
+    python app.py --config config.json --lr 1e-4      # JSON + CLI 覆盖
+
+    # Notebook / 脚本内直接调用
+    from rl_state_modeling.config import Config
+    from rl_state_modeling.app import run_pipeline
+
+    config = Config(hidden_dim=256, learning_rate=1e-4)
+    run_pipeline(config, n_samples=500, n_episodes=100, device='cpu')
+
+    # 或者从 JSON 加载
+    config = Config.from_json('config.json')
+    run_pipeline(config, n_samples=500, n_episodes=100)
 """
 
 import os
@@ -23,66 +36,72 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from datetime import datetime
+from typing import Optional, List
 
 _SELF_DIR = os.path.dirname(os.path.abspath(__file__))
 _PARENT_DIR = os.path.dirname(_SELF_DIR)
 if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
 
-from rl_git.config import Config, generate_synthetic_data, generate_self_supervised_labels
-from rl_git.train import PPOTrainer
-from rl_git.predict import Predictor
+from rl_state_modeling.config import Config, generate_synthetic_data, generate_self_supervised_labels
+from rl_state_modeling.train import PPOTrainer
+from rl_state_modeling.predict import Predictor
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description='RL State Transition Risk Model — 完整流程',
-        formatter_class=argparse.RawTextHelpFormatter,
-        epilog='\nExamples:\n'
-               '  python app.py\n'
-               '  python app.py --n_samples 1000 --n_episodes 200 --lr 1e-4\n'
-               '  python app.py --gpu_ids 0 1 2 3\n',
-    )
-    # ---- Data ----
-    g = p.add_argument_group('Data')
-    g.add_argument('--n_samples', type=int, default=200)
-    g.add_argument('--seed', type=int, default=42)
-    # ---- Training loop ----
-    g = p.add_argument_group('Training Loop')
-    g.add_argument('--n_episodes', type=int, default=80)
-    # ---- Model config (defined in Config.add_argparse_args) ----
-    Config.add_argparse_args(p)
-    # ---- Hardware ----
-    g = p.add_argument_group('Hardware')
-    g.add_argument('--device', type=str,
-                   default='cuda' if torch.cuda.is_available() else 'cpu')
-    g.add_argument('--gpu_ids', type=int, nargs='*', default=None,
-                   help='GPU IDs for DataParallel, e.g. 0 1 2 3')
-    # ---- Output ----
-    g = p.add_argument_group('Output')
-    g.add_argument('--output_dir', type=str, default=None)
-    g.add_argument('--no_plot', action='store_true')
-    g.add_argument('--no_csv', action='store_true')
-    return p
+# ============================================================
+# 核心 pipeline（可直接在 notebook 中调用）
+# ============================================================
 
+def run_pipeline(
+    config: Config,
+    n_samples: int = 200,
+    n_episodes: int = 80,
+    seed: int = 42,
+    device: str = 'cpu',
+    gpu_ids: Optional[List[int]] = None,
+    output_dir: Optional[str] = None,
+    no_plot: bool = False,
+    no_csv: bool = False,
+):
+    """运行完整 pipeline，所有参数显式传入，适合 notebook / 脚本调用。
 
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
+    Parameters
+    ----------
+    config : Config
+        模型配置，可以直接构造 Config(...) 或 Config.from_json('config.json')
+    n_samples : int
+        生成的样本数量
+    n_episodes : int
+        训练 episode 数
+    seed : int
+        随机种子
+    device : str
+        计算设备，'cpu' 或 'cuda'
+    gpu_ids : list of int, optional
+        DataParallel 使用的 GPU ID 列表
+    output_dir : str, optional
+        输出目录，默认为当前目录下的 output_demo/
+    no_plot : bool
+        是否跳过生成图表
+    no_csv : bool
+        是否跳过导出 CSV
 
-    output_dir = args.output_dir or os.path.join(_SELF_DIR, 'output_demo')
+    Returns
+    -------
+    dict
+        results, summary, history
+    """
+    if output_dir is None:
+        output_dir = os.path.join(_SELF_DIR, 'output_demo')
     os.makedirs(output_dir, exist_ok=True)
-
-    # ---- Config from CLI args ----
-    config = Config.from_args(args)
 
     print("=" * 60)
     print("  RL State Transition Risk Model — 完整流程")
     print("=" * 60)
     print(f"  Config: {config.summary()}")
-    print(f"  Data  : n_samples={args.n_samples}, n_episodes={args.n_episodes}")
-    print(f"  Device: {args.device}"
-          + (f", DataParallel GPUs {args.gpu_ids}" if args.gpu_ids and len(args.gpu_ids) > 1 else ""))
+    print(f"  Data  : n_samples={n_samples}, n_episodes={n_episodes}")
+    print(f"  Device: {device}"
+          + (f", DataParallel GPUs {gpu_ids}" if gpu_ids and len(gpu_ids) > 1 else ""))
     print("─" * 60)
 
     # ============================================================
@@ -90,7 +109,7 @@ def main():
     # ============================================================
     print("\n[Step 1] 生成伪造数据 ...")
     behaviors, true_labels, tp_labels = generate_synthetic_data(
-        args.n_samples, config, seed=args.seed)
+        n_samples, config, seed=seed)
     print(f"  行为序列: {behaviors.shape}")
     print(f"  正样本占比: {true_labels.mean():.2%}")
     ssl_labels, ssl_tp = generate_self_supervised_labels(behaviors, config)
@@ -100,9 +119,9 @@ def main():
     # 2. 训练
     # ============================================================
     print(f"\n[Step 2] PPO 训练 ...")
-    trainer = PPOTrainer(config, device=args.device, gpu_ids=args.gpu_ids)
+    trainer = PPOTrainer(config, device=device, gpu_ids=gpu_ids)
     history = trainer.train(behaviors, true_labels, tp_labels,
-                            n_episodes=args.n_episodes)
+                            n_episodes=n_episodes)
 
     rewards = [h['reward'] for h in history]
     a_losses = [h['actor_loss'] for h in history]
@@ -124,7 +143,7 @@ def main():
     # 4. 推理预测
     # ============================================================
     print(f"\n[Step 3] 推理预测 ...")
-    predictor = Predictor.load(ckpt_path, device=args.device)
+    predictor = Predictor.load(ckpt_path, device=device)
     results = predictor.predict_batch(behaviors)
 
     summary = []
@@ -150,7 +169,7 @@ def main():
     # ============================================================
     # 5. 可视化
     # ============================================================
-    if not args.no_plot:
+    if not no_plot:
         print(f"\n[Step 4] 生成图表 ...")
         fig, axes = plt.subplots(2, 3, figsize=(16, 10))
         fig.suptitle('RL State Transition Risk Model — Results', fontsize=14, fontweight='bold')
@@ -218,7 +237,7 @@ def main():
     # ============================================================
     # 6. CSV
     # ============================================================
-    if not args.no_csv:
+    if not no_csv:
         import csv
         csv_path = os.path.join(output_dir, 'summary.csv')
         with open(csv_path, 'w', newline='') as f:
@@ -231,6 +250,79 @@ def main():
     print(f"  完成!  {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"  {output_dir}/")
     print(f"{'=' * 60}")
+
+    return {
+        'results': results,
+        'summary': summary,
+        'history': history,
+    }
+
+
+# ============================================================
+# CLI entry（命令行入口）
+# ============================================================
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description='RL State Transition Risk Model — 完整流程',
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog='\nExamples:\n'
+               '  python app.py\n'
+               '  python app.py --n_samples 1000 --n_episodes 200 --lr 1e-4\n'
+               '  python app.py --config config.json\n'
+               '  python app.py --config config.json --lr 1e-4\n'
+               '  python app.py --gpu_ids 0 1 2 3\n',
+    )
+    # ---- Config file ----
+    p.add_argument('--config', type=str, default=None,
+                   help='Path to a JSON config file. CLI flags will override its values.')
+    # ---- Data ----
+    g = p.add_argument_group('Data')
+    g.add_argument('--n_samples', type=int, default=200)
+    g.add_argument('--seed', type=int, default=42)
+    # ---- Training loop ----
+    g = p.add_argument_group('Training Loop')
+    g.add_argument('--n_episodes', type=int, default=80)
+    # ---- Model config (defined in Config.add_argparse_args) ----
+    Config.add_argparse_args(p)
+    # ---- Hardware ----
+    g = p.add_argument_group('Hardware')
+    g.add_argument('--device', type=str,
+                   default='cuda' if torch.cuda.is_available() else 'cpu')
+    g.add_argument('--gpu_ids', type=int, nargs='*', default=None,
+                   help='GPU IDs for DataParallel, e.g. 0 1 2 3')
+    # ---- Output ----
+    g = p.add_argument_group('Output')
+    g.add_argument('--output_dir', type=str, default=None)
+    g.add_argument('--no_plot', action='store_true')
+    g.add_argument('--no_csv', action='store_true')
+    return p
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # ---- Config: JSON 优先，CLI 覆盖 ----
+    if args.config:
+        config = Config.from_json(args.config)
+        # CLI args override JSON values
+        config = Config.from_args(args, base=config)
+        print(f"[main] Loaded base config from {args.config}, CLI flags override.")
+    else:
+        config = Config.from_args(args)
+
+    run_pipeline(
+        config=config,
+        n_samples=args.n_samples,
+        n_episodes=args.n_episodes,
+        seed=args.seed,
+        device=args.device,
+        gpu_ids=args.gpu_ids,
+        output_dir=args.output_dir,
+        no_plot=args.no_plot,
+        no_csv=args.no_csv,
+    )
 
 
 if __name__ == '__main__':

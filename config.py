@@ -7,6 +7,7 @@ Usage:
     config = Config.update_from_args(args)      # from argparse namespace
 """
 
+import json
 import numpy as np
 from dataclasses import dataclass, asdict
 from typing import Dict, Any
@@ -56,13 +57,21 @@ class Config:
         }
 
     @classmethod
-    def from_args(cls, args: argparse.Namespace) -> 'Config':
+    def from_args(cls, args: argparse.Namespace, base: 'Config' = None) -> 'Config':
         """Build Config from argparse namespace.
 
         Any arg that matches a Config field name gets applied.
         Aliases (e.g. 'lr' → 'learning_rate') are resolved via cli_alias_map().
+
+        Parameters
+        ----------
+        args : argparse.Namespace
+            Parsed CLI arguments.
+        base : Config, optional
+            If provided, start from this Config and overlay the CLI args on top.
+            Used for JSON + CLI override: Config.from_args(args, base=Config.from_json(...))
         """
-        config = cls()
+        config = base if base is not None else cls()
         alias = cls.cli_alias_map()
         args_dict = vars(args)
 
@@ -77,6 +86,39 @@ class Config:
                         setattr(config, field_name, args_dict[arg_key])
                         break
 
+        return config
+
+    @classmethod
+    def from_json(cls, path: str) -> 'Config':
+        """Build Config from a JSON file.
+
+        The JSON file should be a flat dict of Config field names to values.
+        Example config.json:
+        {
+            "hidden_dim": 256,
+            "learning_rate": 1e-4,
+            "n_steps": 120
+        }
+        """
+        with open(path, 'r') as f:
+            data = json.load(f)
+        config = cls()
+        valid_fields = set(cls.__dataclass_fields__)
+        alias = cls.cli_alias_map()
+        # reverse alias map: field_name → arg_key
+        rev_alias = {v: k for k, v in alias.items()}
+        for key, value in data.items():
+            # direct field name
+            if key in valid_fields:
+                setattr(config, key, value)
+            # CLI alias (e.g. "lr" → "learning_rate")
+            elif key in alias:
+                setattr(config, alias[key], value)
+            # field name used as CLI arg (e.g. "learning_rate" could be "lr" in JSON)
+            elif key in rev_alias:
+                setattr(config, key, value)
+            else:
+                print(f"[Config.from_json] Warning: unknown key '{key}', ignored.")
         return config
 
     def to_dict(self) -> Dict[str, Any]:

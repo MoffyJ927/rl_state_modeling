@@ -10,7 +10,7 @@ Usage:
 import json
 import numpy as np
 from dataclasses import dataclass, asdict
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 import argparse
 
 
@@ -170,69 +170,88 @@ class Config:
 # Data utilities
 # ==========================================
 
+_DIST_GENERATORS = {
+    'normal':   lambda rng, shape, p: rng.normal(p.get('loc', 0), p.get('scale', 1), shape),
+    'uniform':  lambda rng, shape, p: rng.uniform(p.get('low', 0), p.get('high', 1), shape),
+    'bernoulli': lambda rng, shape, p: rng.binomial(1, p.get('p', 0.5), shape),
+    'poisson':  lambda rng, shape, p: rng.poisson(p.get('lam', 1), shape),
+    'exponential': lambda rng, shape, p: rng.exponential(p.get('scale', 1), shape),
+    'categorical': lambda rng, shape, p: rng.choice(p['categories'], shape, p=p.get('probs')),
+    'constant': lambda rng, shape, p: np.full(shape, p.get('value', 0)),
+}
+
+
 def generate_synthetic_data(
     n_samples: int,
     config: Config,
-    seed: int = 42
+    seed: int = 42,
+    feature_dim: Optional[int] = None,
+    col_spec: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple:
     """
     Generate synthetic behavioral sequences + labels for demo / testing.
 
-    Returns:
+    Parameters
+    ----------
+    n_samples : int
+    config : Config
+    seed : int
+    feature_dim : int, optional
+        Override config.feature_dim. If None, use config.feature_dim.
+    col_spec : list of dict, optional
+        Per-column distribution specification. Columns not listed default to normal.
+        Example (128 features, all 7 distributions):
+            col_spec = [
+                {"indices": [0, 1, 2], "dist": "bernoulli", "params": {"p": 0.3}},
+                {"indices": [3, 4],    "dist": "uniform", "params": {"low": -1, "high": 1}},
+                {"indices": [5, 6],    "dist": "poisson", "params": {"lam": 5}},
+                {"indices": [7],       "dist": "exponential", "params": {"scale": 2}},
+                {"indices": [8, 9],    "dist": "categorical", "params": {"categories": [0, 1, 2], "probs": [0.1, 0.3, 0.6]}},
+                {"indices": [10],      "dist": "constant", "params": {"value": 0}},
+                {"indices": [11, 12],  "dist": "normal", "params": {"loc": 0, "scale": 1}},
+            ]
+        Supported distributions and their params:
+          'normal'      — {'loc': 0, 'scale': 1}
+          'uniform'     — {'low': 0, 'high': 1}
+          'bernoulli'   — {'p': 0.5}
+          'poisson'     — {'lam': 1}
+          'exponential' — {'scale': 1}
+          'categorical' — {'categories': [a, b, c], 'probs': [...]}  # probs 可选，默认均匀
+          'constant'    — {'value': 0}
+
+    Returns
+    -------
         behavior_sequences: (n_samples, seq_len, feature_dim)
         true_labels:        (n_samples,)  0/1 final risk event
         timepoint_labels:   (n_samples, score_window) per-timestep risk state
     """
     rng = np.random.RandomState(seed)
+    fd = feature_dim if feature_dim is not None else config.feature_dim
 
-    behavior_sequences = rng.randn(
-        n_samples, config.seq_len, config.feature_dim
-    ).astype(np.float32)
+    # Build per-column generator lookup: col_idx → (generator_fn, params)
+    col_gen = {}
+    if col_spec:
+        for entry in col_spec:
+            gen_fn = _DIST_GENERATORS[entry['dist']]
+            params = entry.get('params', {})
+            for idx in entry['indices']:
+                col_gen[idx] = (gen_fn, params)
+
+    # Generate feature by feature
+    # shape for one column: (n_samples, seq_len)
+    col_shape = (n_samples, config.seq_len)
+    cols = []
+    for c in range(fd):
+        if c in col_gen:
+            fn, params = col_gen[c]
+            col = fn(rng, col_shape, params)
+        else:
+            col = rng.randn(*col_shape)
+        cols.append(col.astype(np.float32))
+
+    behavior_sequences = np.stack(cols, axis=-1)  # (n_samples, seq_len, feature_dim)
 
     true_labels = rng.randint(0, 2, n_samples).astype(np.float32)
     timepoint_labels = rng.rand(n_samples, config.score_window).astype(np.float32)
 
     return behavior_sequences, true_labels, timepoint_labels
-
-
-def generate_self_supervised_labels(
-    behavior_sequences: np.ndarray,
-    config: Config,
-) -> tuple:
-    """
-    Generate self-supervised pseudo-labels based on behavior change intensity.
-
-    Strategy:
-      - Compute L2 norm of adjacent timestep differences
-      - High change → higher risk probability
-
-    Returns:
-        final_labels:      (n_samples,)  binary final risk label
-        timepoint_labels:  (n_samples, score_window)  per-timestep risk state
-    """
-    batch_size, seq_len, feature_dim = behavior_sequences.shape
-
-    # Adjacent timestep differences
-    diffs = np.diff(behavior_sequences, axis=1)  # (batch, seq_len-1, feature_dim)
-
-    # L2 norm as change intensity
-    change_intensity = np.linalg.norm(diffs, axis=-1)  # (batch, seq_len-1)
-
-    # Normalize to [0, 1]
-    min_v = change_intensity.min(axis=1, keepdims=True)
-    max_v = change_intensity.max(axis=1, keepdims=True)
-    change_intensity = (change_intensity - min_v) / (max_v + 1e-8)
-
-    # Final label: whether max change exceeds threshold
-    final_labels = (change_intensity.max(axis=1) > 0.5).astype(np.float32)
-
-    # Timepoint labels: truncate/pad to score_window
-    sw = config.score_window
-    if seq_len - 1 < sw:
-        padded = np.zeros((batch_size, sw), dtype=np.float32)
-        padded[:, :seq_len - 1] = change_intensity
-        timepoint_labels = padded
-    else:
-        timepoint_labels = change_intensity[:, :sw].astype(np.float32)
-
-    return final_labels, timepoint_labels

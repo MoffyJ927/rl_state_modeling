@@ -21,9 +21,9 @@ Modules:
   predict – inference wrapper
 
 Quick start:
-    from rl_git.config import Config, generate_synthetic_data
-    from rl_git.train import PPOTrainer
-    from rl_git.predict import Predictor
+    from rl_state_modeling.config import Config, generate_synthetic_data
+    from rl_state_modeling.train import PPOTrainer
+    from rl_state_modeling.predict import Predictor
 
     cfg = Config()
     X, y, tp = generate_synthetic_data(100, cfg)

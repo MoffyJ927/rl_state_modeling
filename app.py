@@ -43,7 +43,7 @@ _PARENT_DIR = os.path.dirname(_SELF_DIR)
 if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
 
-from rl_state_modeling.config import Config, generate_synthetic_data, generate_self_supervised_labels
+from rl_state_modeling.config import Config, generate_synthetic_data
 from rl_state_modeling.train import PPOTrainer
 from rl_state_modeling.predict import Predictor
 
@@ -112,8 +112,6 @@ def run_pipeline(
         n_samples, config, seed=seed)
     print(f"  行为序列: {behaviors.shape}")
     print(f"  正样本占比: {true_labels.mean():.2%}")
-    ssl_labels, ssl_tp = generate_self_supervised_labels(behaviors, config)
-    print(f"  自监督正样本占比: {ssl_labels.mean():.2%}")
 
     # ============================================================
     # 2. 训练
